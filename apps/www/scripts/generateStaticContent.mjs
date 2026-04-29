@@ -391,7 +391,7 @@ try {
     const { Octokit } = await import('@octokit/core')
     const { paginateGraphql } = await import('@octokit/plugin-paginate-graphql')
 
-    const { generateChangelogRssXml, generateChangelogTagRssXml, labelToFileSlug } =
+    const { generateChangelogRssXml, generateChangelogTagRssXml, labelToFileSlug, changelogEntrySlug } =
       await import('../lib/changelog-rss.mjs')
     const rewritesPath = path.join(__dirname, 'data/changelog-deleted-discussions.json')
     const rewrites = JSON.parse(await fs.readFile(rewritesPath, 'utf8'))
@@ -465,6 +465,7 @@ try {
 
     const entries = collected.map((item) => ({
       number: item.number,
+      slug: changelogEntrySlug(item.number, item.title),
       title: item.title,
       url: item.url,
       sortDate: discussionDisplayDate({ title: item.title, createdAt: item.createdAt }),
@@ -498,26 +499,41 @@ try {
 
     // LLM-friendly changelog markdown index (RSS remains canonical syndication format).
     const visibleEntries = entries.filter((entry) => !entry.title.includes('[d]'))
-    const escapeMd = (value) =>
-      String(value ?? '')
-        .replace(/\\/g, '\\\\')
-        .replace(/\|/g, '\\|')
-        .replace(/\n/g, ' ')
-    const mdRows = visibleEntries.map((entry) => {
+
+    /**
+     * Extracts the first meaningful paragraph from a markdown body.
+     * Skips headings, code fences, HTML blocks, and empty lines.
+     */
+    const extractSummary = (body) => {
+      if (!body) return ''
+      for (const para of body.split(/\n{2,}/)) {
+        const trimmed = para.trim()
+        if (
+          !trimmed ||
+          trimmed.startsWith('#') ||
+          trimmed.startsWith('```') ||
+          trimmed.startsWith('<') ||
+          trimmed.startsWith('|') ||
+          trimmed.startsWith('---')
+        ) continue
+        const oneLiner = trimmed.replace(/\n/g, ' ')
+        return oneLiner.length > 200 ? oneLiner.slice(0, 200).replace(/\s+\S*$/, '') + '…' : oneLiner
+      }
+      return ''
+    }
+
+    const mdSections = visibleEntries.map((entry) => {
       const date = dayjs(entry.sortDate).isValid() ? dayjs(entry.sortDate).format('YYYY-MM-DD') : ''
       const labels = (entry.labels ?? []).join(', ')
-      return `| ${date} | ${entry.number} | ${escapeMd(labels)} | ${escapeMd(entry.title)} | [/changelog/${entry.number}.md](https://supabase.com/changelog/${entry.number}.md) |`
+      const meta = [date, labels, `[supabase.com/changelog/${entry.slug}](https://supabase.com/changelog/${entry.slug})`]
+        .filter(Boolean)
+        .join(' · ')
+      const summary = extractSummary(entry.body)
+      return [`## ${entry.title}`, meta, summary].filter(Boolean).join('\n\n')
     })
-    const changelogMd = `# Supabase Changelog
-
-All paths are relative to \`https://supabase.com\`.
-
-| Date | # | Labels | Title | Path |
-| --- | --- | --- | --- | --- |
-${mdRows.join('\n')}
-`
+    const changelogMd = `# Supabase Changelog\n\n${mdSections.join('\n\n---\n\n')}\n`
     const changelogMdPath = path.join(__dirname, '../public/changelog.md')
-    await fs.writeFile(changelogMdPath, changelogMd.trim() + '\n', 'utf8')
+    await fs.writeFile(changelogMdPath, changelogMd, 'utf8')
     console.log(`✅ Generated changelog.md (${visibleEntries.length} entries)`)
 
     // One markdown file per entry → /changelog/<number>.md (same content shape as the web page body).
@@ -531,9 +547,10 @@ ${mdRows.join('\n')}
         .replace(/\n/g, ' ')
         .trim()
       const labelsYaml = (entry.labels ?? []).map((l) => `  - ${l}`).join('\n')
-      const pageUrl = `https://supabase.com/changelog/${entry.number}`
+      const pageUrl = `https://supabase.com/changelog/${entry.slug}`
       const entryMd = `---
 number: ${entry.number}
+slug: ${entry.slug}
 published: ${published}
 discussion: ${entry.url}
 labels:
@@ -546,7 +563,7 @@ page: ${pageUrl}
 ${entry.body ?? ''}
 `
       await fs.writeFile(
-        path.join(changelogEntryMdDir, `${entry.number}.md`),
+        path.join(changelogEntryMdDir, `${entry.slug}.md`),
         entryMd.trim() + '\n',
         'utf8'
       )
